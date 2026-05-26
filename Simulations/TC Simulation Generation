@@ -1,0 +1,200 @@
+#TC Simulations
+import os
+import math
+import pickle
+import gc
+import random
+import numpy as np
+import matplotlib.pyplot as plt
+from matplotlib.backends.backend_pdf import PdfPages
+from tqdm import tqdm
+import time
+import shutil
+import tempfile
+
+
+#Mount Google Drive
+from google.colab import drive
+drive.mount('/content/drive')
+
+
+#Simulation parameters
+TOTAL_SIMULATIONS = 1_000_000   
+CHUNK_SIZE        =   10_000    
+
+nb_points_list    = [6, 10]    
+a_list            = [0, 0.2]
+smd_list          = [0, 1, 1.44, 2, 3]      
+ct                = 10         
+
+non_zero_tr_listA = [-30, 30]
+non_zero_tr_listB = [-30, 30]
+non_zero_r_list   = [2]
+TREND_PROB        = 0.375      #37.5% chance of trend occurring
+RATE_PROB         = 0.375      #37.5% chance of higher level control condition
+
+#Paths
+BASE_DIR      = "/content/drive/MyDrive/1.44tcsimulations"
+pickle_dir    = os.path.join(BASE_DIR, "pickles")
+pdf_dir       = os.path.join(BASE_DIR, "pdfs")
+metadata_file = os.path.join(BASE_DIR, "metadata.pkl")
+
+os.makedirs(pickle_dir, exist_ok=True)
+os.makedirs(pdf_dir,    exist_ok=True)
+
+
+#Metadata - because it was a lot of data to store
+import glob
+
+import os, pickle, glob, re
+
+def load_metadata():
+    #Load metadata
+    if os.path.exists(metadata_file):
+        try:
+            with open(metadata_file, "rb") as f:
+                return pickle.load(f)
+        except Exception:
+            pass
+
+    #Scan for chuncks if load of metadata was not successful
+    pattern = re.compile(r"chunk_(\d+)(?:_.*)?\.pkl$")
+    chunk_files = glob.glob(os.path.join(pickle_dir, "chunk_*.pkl"))
+    ids = []
+    for fn in chunk_files:
+        m = pattern.search(os.path.basename(fn))
+        if m:
+            ids.append(int(m.group(1)))
+    if ids:
+        max_id = max(ids)
+        return max_id * CHUNK_SIZE, max_id
+
+    #If nothing to load, start from 0
+    return 0, 0
+
+def save_metadata(count, chunk_id):
+    """Persist count and chunk_id to metadata_file."""
+    with open(metadata_file, "wb") as f:
+        pickle.dump((count, chunk_id), f)
+
+#Creation of time series and data
+def create_time_series(n, a, ct):
+    series = [np.random.normal()]
+    for i in range(1, n):
+        series.append(a*series[i-1] + np.random.normal())
+    return np.array(series) + ct
+
+def create_ME_data(a, trA, trB, ct, nb_points, smd, r):
+    total_sessions = 2 * nb_points
+    labels = np.array(['Control','Test'] * nb_points)[:total_sessions]
+    values = create_time_series(total_sessions, a, ct)
+
+    #apply SMD to Test condition only
+    idxB = np.where(labels=='Test')[0]
+    values[idxB] += smd
+
+    #apply trend
+    mid = np.median(np.arange(total_sessions))
+    for j in range(total_sessions):
+        angle = trA if labels[j]=='Control' else trB
+        values[j] += (j-mid) * math.tan(math.radians(angle))
+
+    #Normalization
+    mn, mx = values.min(), values.max()
+    values = (values - mn) / (mx - mn) * 10
+
+    #Ensure exact SMD application
+    idxA = np.where(labels=='Control')[0]
+    meanA, meanB = values[idxA].mean(), values[idxB].mean()
+    adj = smd - (meanB - meanA)
+    values[idxB] += adj/2
+    values[idxA] -= adj/2
+    mn, mx = values.min(), values.max()
+    values = (values - mn) / (mx - mn) * 10
+
+    #apply increased level
+    if r:
+        values += r
+
+    return labels, values
+
+#Plotting
+def ATgraph(ME_data, nb_points):
+    labels, values = ME_data
+    total = len(labels)  
+    idxA = np.where(labels=='Control')[0]
+    idxB = np.where(labels=='Test')[0]
+
+    fig, ax = plt.subplots(figsize=(8,4))
+    ax.grid(False)
+
+    ax.plot(idxA+1, values[idxA], 'ks-', label='Control')
+    ax.plot(idxB+1, values[idxB], 'ko-', label='Test')
+    ax.set_xlabel('Session')
+    ax.set_ylabel('Behavior')
+    ax.legend(loc='upper right', frameon=False)
+
+    #x-axis: start at 0 and increase by 2
+    ax.set_xlim(0, total)
+    ax.set_xticks(np.arange(0, total+1, 2))
+
+    #y-axis: start at 0 and increase by 2
+    ax.set_ylim(0, total)
+    ax.set_yticks(np.arange(0, total+1, 2))
+
+    ax.spines['right'].set_visible(False)
+    ax.spines['top'].set_visible(False)
+    return fig
+
+#Main simulation loop
+def perform_randomized_simulations():
+    count, chunk_id = load_metadata()
+    buffer = []
+
+    for _ in tqdm(range(count, TOTAL_SIMULATIONS), desc="Simulating"):
+        #Random choice of parameters
+        nb  = random.choice(nb_points_list)
+        a   = random.choice(a_list)
+        smd = random.choice(smd_list)
+        trA = random.choice(non_zero_tr_listA) if random.random() < TREND_PROB else 0
+        trB = random.choice(non_zero_tr_listB) if random.random() < TREND_PROB else 0
+        r   = random.choice(non_zero_r_list)   if random.random() < RATE_PROB  else 0
+
+        #Data generation
+        labels, values = create_ME_data(a, trA, trB, ct, nb, smd, r)
+
+        #Build figure
+        fig = ATgraph((labels, values), nb)
+
+        #Save pdf
+        pdf_filename = f"MEgraph_{count}.pdf"
+        pdf_path     = os.path.join(pdf_dir, pdf_filename)
+        local_pdf    = os.path.join(tempfile.gettempdir(), pdf_filename)
+
+        #Buffer for pickle
+        buffer.append({'labels': labels, 'values': values})
+        count += 1
+
+        #Pickle dump
+        if len(buffer) >= CHUNK_SIZE:
+            chunk_id += 1
+            pkl_path = os.path.join(pickle_dir, f"chunk_{chunk_id}.pkl")
+            with open(pkl_path, 'wb') as f:
+                pickle.dump(buffer, f)
+            buffer.clear()
+            gc.collect()
+            save_metadata(count, chunk_id)
+
+    #Save
+    if buffer:
+        chunk_id += 1
+        pkl_path = os.path.join(pickle_dir, f"chunk_{chunk_id}.pkl")
+        with open(pkl_path, 'wb') as f:
+            pickle.dump(buffer, f)
+        save_metadata(count, chunk_id)
+
+    print(f"{count} graphs generated.")
+
+
+if __name__ == "__main__":
+    perform_randomized_simulations()
