@@ -189,7 +189,7 @@ for trial in range(phase1_trials):
 
 print(f"Best Phase 1: κ={best_kappa:.4f}, Params: {best_params}")
 
-#Phase 2: Grid search around best
+#Phase 2: Grid search (problem-solved due to errors for try)
 print(f"\nPhase 2: Grid Search ({phase2_trials} trials)")
 
 C_neighbors = get_neighbors(best_params['C'], lr_param_space['C'])
