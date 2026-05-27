@@ -1,0 +1,183 @@
+#MC Normalization and Data Extraction
+
+#Mount Colab
+from google.colab import drive
+drive.mount('/content/drive')
+
+#Import packages
+import os
+import pickle
+import numpy as np
+import pandas as pd
+from sklearn.cluster import KMeans
+from sklearn.linear_model import LinearRegression
+
+#Paths and load data
+base_dir = '/content/drive/MyDrive/New5cpickles'
+pkl_file = os.path.join(base_dir, '1.44all_swapped_notnormalized.pkl')
+
+with open(pkl_file, 'rb') as f:
+    data_list = pickle.load(f)
+
+#Conditions
+CONDS = ['Control', 'Attention', 'Tangibles', 'Escape', 'Alone']
+SMD_THRESH = 1.44
+
+#Standardize data and feature extraction
+def standardize_data(x):
+    labels = np.asarray(x[0])
+    values = np.asarray(x[1], dtype=float)
+
+    idx = {c: np.where(labels == c)[0] for c in CONDS}
+    vals = {c: values[idx[c]].flatten() for c in CONDS}
+
+    all_vals = np.hstack([vals[c] for c in CONDS if vals[c].size])
+    overallMean = np.mean(all_vals) if all_vals.size else 0.0
+    overallSd = np.std(all_vals) if all_vals.size else 1.0
+    if overallSd == 0:
+        overallSd = 1.0
+
+    for c in CONDS:
+        z = (vals[c] - overallMean) / overallSd
+        vals[c] = np.where(np.isnan(z), 0.0, z)
+
+    features = []
+
+    #Means
+    for c in CONDS:
+        features.append(float(np.mean(vals[c])) if vals[c].size else 0.0)
+
+    #Standard deviations
+    for c in CONDS:
+        features.append(float(np.std(vals[c])) if vals[c].size else 0.0)
+
+    #LR intercept and slope
+    for c in CONDS:
+        v = vals[c]
+        if v.size > 1:
+            lm = LinearRegression().fit(np.arange(v.size).reshape(-1, 1), v) #treats each condition as independent
+            intercept = lm.intercept_[0] if np.ndim(lm.intercept_) > 0 else float(lm.intercept_)
+            slope = lm.coef_[0][0] if np.ndim(lm.coef_) > 1 else float(lm.coef_.ravel()[0])
+            features.extend([intercept, slope])
+        else:
+            features.extend([0.0, 0.0])
+
+    #IQR
+    for c in CONDS:
+        v = vals[c]
+        if v.size:
+            q75, q25 = np.percentile(v, [75, 25])
+            features.append(float(q75 - q25))
+        else:
+            features.append(0.0)
+
+    return np.array(features, dtype=float).ravel(), vals
+
+#Cohen's d - problem-solved
+def cohen_d(a, b):
+    a = np.asarray(a, dtype=float)
+    b = np.asarray(b, dtype=float)
+    na, nb = a.size, b.size
+    if na == 0 or nb == 0:
+        return 0.0
+    ma, mb = a.mean(), b.mean()
+    va = a.var(ddof=1) if na > 1 else 0.0
+    vb = b.var(ddof=1) if nb > 1 else 0.0
+    df = max(na + nb - 2, 1)
+    sp2 = ((na - 1) * va + (nb - 1) * vb) / df
+    sp = np.sqrt(sp2) if sp2 > 0 else 1.0
+    return float((ma - mb) / sp)
+
+#CSV columns
+columns = (
+    [f'Mean {c}' for c in CONDS] +
+    [f'Std {c}' for c in CONDS] +
+    [f'Intercept {c}' for c in CONDS] +
+    [f'Slope {c}' for c in CONDS] +
+    [f'IQR {c}' for c in CONDS] +
+    [f'Stability {c}' for c in CONDS] +
+    ['PND Control-Others', 'Highest Response Condition',
+     'Cluster Similarity Test', 'Differentiation Type', 'Category'] +
+    [f'SMD {c} vs Control' for c in ['Attention', 'Tangibles', 'Escape', 'Alone']] +
+    [f'Has SMD >= {SMD_THRESH:.2f}']
+)
+num_cols = len(columns)
+
+all_features = []
+
+#Run all simulations from the .pkl
+for idx, item in enumerate(data_list):
+    labels = item['labels']
+    values = item['datapoint_values']
+    category = item.get('category', 0)
+
+    try:
+        #Call standardized data
+        norm_features, vals = standardize_data((labels, values))
+
+        #Stability
+        for c in CONDS:
+            v = vals[c]
+            m = float(v.mean()) if v.size else 0.0
+            s = float(v.std()) if v.size else 0.0
+            stability = s / m if m != 0 else 0
+            norm_features = np.append(norm_features, stability)
+
+        #PND
+        ctrl = vals['Control']
+        if ctrl.size:
+            ctrl_max = float(ctrl.max())
+            others_n = sum(vals[c].size for c in CONDS if c != 'Control')
+            non_overlap = sum((vals[c] > ctrl_max).sum() for c in CONDS if c != 'Control')
+            pnd = non_overlap / others_n if others_n else 0.0
+        else:
+            pnd = 0.0
+
+        #Highest response condition
+        mean_norm = {c: float(vals[c].mean()) if vals[c].size else 0.0 for c in CONDS}
+        highest_response = max(mean_norm, key=mean_norm.get)
+
+        #Cluster similarity
+        km_in = np.array(list(mean_norm.values()), dtype=float).reshape(-1, 1)
+        if len(np.unique(km_in)) == 1:
+            cluster_similarity_test = 1
+        else:
+            kmeans = KMeans(n_clusters=2, random_state=0).fit(km_in)
+            labels_k = kmeans.labels_
+            cluster_similarity_test = int(labels_k[0] == labels_k[1])
+
+        #Ground truth via computed SMD
+        smd_calc = {
+            'Attention': cohen_d(vals['Attention'], vals['Control']),
+            'Tangibles': cohen_d(vals['Tangibles'], vals['Control']),
+            'Escape':    cohen_d(vals['Escape'],    vals['Control']),
+            'Alone':     cohen_d(vals['Alone'],     vals['Control']),
+        }
+        diff_flag = any(abs(smd_calc[k]) >= SMD_THRESH for k in smd_calc)
+        diff_type = 'differentiated' if diff_flag else 'undifferentiated'
+
+        #Combine
+        features = list(norm_features) + [pnd, highest_response, cluster_similarity_test,
+                                          diff_type, category]
+        for k in ['Attention', 'Tangibles', 'Escape', 'Alone']:
+            features.append(float(smd_calc[k]))
+        features.append(int(diff_flag))
+
+    #Added problem-solve due to incorrect feature count
+    except Exception as e:
+        print(f"Error at index {idx}: {e}")
+        features = [0] * num_cols
+
+    #Ensure vector is the correct length
+    if len(features) < num_cols:
+        features += [0] * (num_cols - len(features))
+    elif len(features) > num_cols:
+        features = features[:num_cols]
+
+    all_features.append(features)
+
+#Build data and save
+df = pd.DataFrame(all_features, columns=columns)
+output_csv = os.path.join(base_dir, '1.44_extracted.csv')
+df.to_csv(output_csv, index=False)
+print("Saved:", output_csv)
