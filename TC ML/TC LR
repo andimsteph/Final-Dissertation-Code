@@ -43,12 +43,6 @@ test_size = 0.25
 val_size = 0.333
 random_state = 321
 
-#Load secondary datasets
-X_tcns, y_tcns = load_and_preprocess_data(secondary_local_paths[0], feature_cols, remove_nans=False)
-X_tcs, y_tcs = load_and_preprocess_data(secondary_local_paths[1], feature_cols, remove_nans=False)
-X_tcns_scaled = scaler.transform(X_tcns)
-X_tcs_scaled = scaler.transform(X_tcs)
-
 #Features
 feature_cols = [
     'Mean Control', 'Mean Test', 'Std Control', 'Std Test',
@@ -228,6 +222,12 @@ final_model.fit(X_train_scaled, y_train)
 train_duration = time.time() - train_start
 print(f"\nFinal model trained in {train_duration:.1f}s")
 print(f"Params: {best_params}")
+
+#Load secondary datasets
+X_tcns, y_tcns = load_and_preprocess_data(secondary_local_paths[0], feature_cols, remove_nans=False)
+X_tcs, y_tcs = load_and_preprocess_data(secondary_local_paths[1], feature_cols, remove_nans=False)
+X_tcns_scaled = scaler.transform(X_tcns)
+X_tcs_scaled = scaler.transform(X_tcs)
 
 #Threshold optimization on TCNS
 val_start = time.time()
